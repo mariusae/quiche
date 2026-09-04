@@ -1582,6 +1582,28 @@ pub fn connect_with_buffer_factory<F: BufFactory>(
     Ok(conn)
 }
 
+/// Creates a client-side connection with an application-selected Initial DCID.
+///
+/// This is equivalent to [`connect_with_buffer_factory`], except that `dcid`
+/// replaces the randomly generated destination connection ID. Applications
+/// that route Initial packets by connection ID can use this to encode their
+/// routing label before the peer supplies its own connection IDs.
+#[inline]
+pub fn connect_with_buffer_factory_and_dcid<F: BufFactory>(
+    server_name: Option<&str>, scid: &ConnectionId, dcid: &ConnectionId,
+    local: SocketAddr, peer: SocketAddr, config: &mut Config,
+) -> Result<Connection<F>> {
+    let mut conn = Connection::new_with_initial_dcid(
+        scid, dcid, local, peer, config, false,
+    )?;
+
+    if let Some(server_name) = server_name {
+        conn.handshake.set_host_name(server_name)?;
+    }
+
+    Ok(conn)
+}
+
 /// Writes a version negotiation packet.
 ///
 /// The `scid` and `dcid` parameters are the source connection ID and the
@@ -1770,12 +1792,32 @@ impl<F: BufFactory> Connection<F> {
         peer: SocketAddr, config: &mut Config, is_server: bool,
     ) -> Result<Connection<F>> {
         let tls = config.tls_ctx.new_handshake()?;
-        Connection::with_tls(scid, odcid, local, peer, config, tls, is_server)
+        Connection::with_tls(
+            scid, odcid, None, local, peer, config, tls, is_server,
+        )
+    }
+
+    fn new_with_initial_dcid(
+        scid: &ConnectionId, dcid: &ConnectionId, local: SocketAddr,
+        peer: SocketAddr, config: &mut Config, is_server: bool,
+    ) -> Result<Connection<F>> {
+        let tls = config.tls_ctx.new_handshake()?;
+        Connection::with_tls(
+            scid,
+            None,
+            Some(dcid),
+            local,
+            peer,
+            config,
+            tls,
+            is_server,
+        )
     }
 
     fn with_tls(
-        scid: &ConnectionId, odcid: Option<&ConnectionId>, local: SocketAddr,
-        peer: SocketAddr, config: &Config, tls: tls::Handshake, is_server: bool,
+        scid: &ConnectionId, odcid: Option<&ConnectionId>,
+        initial_dcid: Option<&ConnectionId>, local: SocketAddr, peer: SocketAddr,
+        config: &Config, tls: tls::Handshake, is_server: bool,
     ) -> Result<Connection<F>> {
         let max_rx_data = config.local_transport_params.initial_max_data;
 
@@ -2006,8 +2048,14 @@ impl<F: BufFactory> Connection<F> {
         // Derive initial secrets for the client. We can do this here because
         // we already generated the random destination connection ID.
         if !is_server {
-            let mut dcid = [0; 16];
-            rand::rand_bytes(&mut dcid[..]);
+            let dcid = match initial_dcid {
+                Some(dcid) => dcid.to_vec(),
+                None => {
+                    let mut dcid = vec![0; 16];
+                    rand::rand_bytes(&mut dcid);
+                    dcid
+                },
+            };
 
             let (aead_open, aead_seal) = crypto::derive_initial_key_material(
                 &dcid,
@@ -2017,11 +2065,7 @@ impl<F: BufFactory> Connection<F> {
             )?;
 
             let reset_token = conn.peer_transport_params.stateless_reset_token;
-            conn.set_initial_dcid(
-                dcid.to_vec().into(),
-                reset_token,
-                active_path_id,
-            )?;
+            conn.set_initial_dcid(dcid.into(), reset_token, active_path_id)?;
 
             conn.crypto_ctx[packet::Epoch::Initial].crypto_open = Some(aead_open);
             conn.crypto_ctx[packet::Epoch::Initial].crypto_seal = Some(aead_seal);
