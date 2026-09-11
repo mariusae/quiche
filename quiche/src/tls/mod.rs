@@ -448,6 +448,12 @@ impl Handshake {
 
     pub fn set_host_name(&mut self, name: &str) -> Result<()> {
         let cstr = ffi::CString::new(name).map_err(|_| Error::TlsFail)?;
+        if name.parse::<std::net::IpAddr>().is_ok() {
+            let param = unsafe { SSL_get0_param(self.as_mut_ptr()) };
+            return map_result(unsafe {
+                X509_VERIFY_PARAM_set1_ip_asc(param, cstr.as_ptr())
+            });
+        }
         let rc =
             unsafe { SSL_set_tlsext_host_name(self.as_mut_ptr(), cstr.as_ptr()) };
         self.map_result_ssl(rc)?;
@@ -1225,6 +1231,10 @@ extern "C" {
     // X509_VERIFY_PARAM
     fn X509_VERIFY_PARAM_set1_host(
         param: *mut X509_VERIFY_PARAM, name: *const c_char, namelen: usize,
+    ) -> c_int;
+
+    fn X509_VERIFY_PARAM_set1_ip_asc(
+        param: *mut X509_VERIFY_PARAM, ipasc: *const c_char,
     ) -> c_int;
 
     // X509_STORE
